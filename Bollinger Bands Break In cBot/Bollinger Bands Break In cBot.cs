@@ -1,12 +1,13 @@
 ﻿// -------------------------------------------------------------------------------------------------
 //
 //    Author: Artur Martins Baarionuevo
-//    Version: 1.0
+//    Version: 1.2
 //
 //    Project: Forex Robot specialized in the Bollinger Bands signals using parameters to reduce losses and to identify the "Breakins" in the borders.
 //
 //    Versions:
 //    1.0 - Initial implementation with auto close in case of a "Break In inversion".
+//    1.2 - Implementation of two new Features: DayTradeOnly mode and DailyStopLossLimit (these two must be active together to be effective).
 //    
 //
 //    TODO:
@@ -30,7 +31,7 @@ namespace cAlgo
         [Parameter("Source")]
         public DataSeries Source { get; set; }
 
-        [Parameter("Quantity (Lots)", DefaultValue = 1, MinValue = 0.01, Step = 0.01)]
+        [Parameter("Quantity (Lots)", DefaultValue = 0.01, MinValue = 0.01, Step = 0.01)]
         public double Quantity { get; set; }
 
         [Parameter("Stop Loss (pips)", DefaultValue = 5, MinValue = 1)]
@@ -38,6 +39,15 @@ namespace cAlgo
 
         [Parameter("Take Profit (pips)", DefaultValue = 5, MinValue = 1)]
         public double TakeProfitInPips { get; set; }
+
+        [Parameter("Day Trade Only", DefaultValue = true)]
+        public bool DayTradeOnly { get; set; }
+
+        [Parameter("Use Daily Stop Loss Limit", DefaultValue = true)]
+        public bool DailyStopLossLimitEnabled { get; set; }
+
+        [Parameter("Daily Consecutive Stop Loss Limit", DefaultValue = 3, MinValue = 1)]
+        public int DailyStopLossLimit { get; set; }
 
         [Parameter("Entry after Candle Break In", DefaultValue = true)]
         public bool CandleBreakIn { get; set; }
@@ -60,7 +70,7 @@ namespace cAlgo
         [Parameter("Bollinger Bands MA Type")]
         public MovingAverageType MAType { get; set; }
 
-        [Parameter("Crossign Signal Delay In Periods", DefaultValue = 0, MinValue = 0, MaxValue = 5, Step = 1)]
+        [Parameter("Crossing Signal Delay In Periods", DefaultValue = 0, MinValue = 0, MaxValue = 5, Step = 1)]
         public int ExecutionDelay { get; set; }
 
 
@@ -70,15 +80,84 @@ namespace cAlgo
         bool hasCrossedBelow = false;
         int delayCounter;
 
-        int qtdStopLoss;
+        int qtdPositionLoss;
+        DateTime lastStopLoss;
+        bool limitReachedMsgSent = false;
+        bool sessionClosing = false;
 
         protected override void OnStart()
         {
             bollingerBands = Indicators.BollingerBands(Source, Periods, Deviations, MAType);
             delayCounter = ExecutionDelay;
-            qtdStopLoss = 0;
+            qtdPositionLoss = 0;
+            lastStopLoss = Server.Time;
 
             Positions.Closed += OnPositionClosed;
+        }
+
+        protected override void OnBar()
+        {
+            var top = bollingerBands.Top.Last(1);
+            var bottom = bollingerBands.Bottom.Last(1);
+            var volumeInUnits = Symbol.QuantityToVolumeInUnits(Quantity);
+
+            if (!DayTradeOnly || (DayTradeOnly && !sessionClosing))
+            {
+                if (DailyStopLossLimitNotReached())
+                {
+                    CheckTopAndBottom(top, bottom);
+
+                    CheckAndExecute(volumeInUnits);
+
+                    DelayTick();
+                }
+                else
+                {
+                    if (!limitReachedMsgSent)
+                    {
+                        Print("Daily Stop Loss Limit reached! No new orders will be executed today! (Date: {0})", Server.Time.ToLongDateString());
+                        limitReachedMsgSent = true;
+                    }
+                }
+            }
+        }
+
+        protected override void OnTick()
+        {
+            if (DayTradeOnly)
+            {
+                try
+                {
+                    if (Symbol.MarketHours.TimeTillClose().TotalMinutes <= 5)
+                    {
+                        sessionClosing = true;
+                        foreach (var position in Positions.FindAll("Top Line Sell", Symbol, TradeType.Sell))
+                        {
+                            Print("Day Trade Only! Position ID {0} - {1} Closed With Net Profit: {2} -> Entry Time: {3}", position.Id, position.Label, position.NetProfit, position.EntryTime);
+                            ClosePosition(position);
+                        }
+
+                        foreach (var position in Positions.FindAll("Bottom Line Buy", Symbol, TradeType.Buy))
+                        {
+                            Print("Day Trade Only! Position ID {0} - {1} Closed With Net Profit: {2} -> Entry Time: {3}", position.Id, position.Label, position.NetProfit, position.EntryTime);
+                            ClosePosition(position);
+                        }
+                    }
+                    else
+                    {
+                        sessionClosing = false;
+                    }
+
+                } catch (InvalidOperationException ex)
+                {
+                    Print("Exception in MarketHours before weekend: {0} - StackTrace: {1}", ex.Message, ex.StackTrace);
+                }
+            }
+
+            if (AutocloseInversion)
+            {
+                CheckOpenPositionsAndCloseInversions();
+            }
         }
 
         private void CheckTopAndBottom(double top, double bottom)
@@ -90,16 +169,14 @@ namespace cAlgo
 
                 if (CandleBreakIn)
                 {
-                    if (Functions.HasCrossedBelow(MarketSeries.Close, bollingerBands.Top, 1))
+                    if (Functions.HasCrossedBelow(MarketSeries.High, bollingerBands.Top, 1))
                     {
                         Print("Market Value {0} Crossed Above Top {1}", MarketSeries.Close.LastValue, bollingerBands.Top.LastValue);
-                        //ExecuteMarketOrder(TradeType.Sell, Symbol, volumeInUnits, label, StopLossInPips, TakeProfitInPips);
                         hasCrossedTop = true;
                     }
-                    else if (Functions.HasCrossedAbove(MarketSeries.Close, bollingerBands.Bottom, 1))
+                    else if (Functions.HasCrossedAbove(MarketSeries.Low, bollingerBands.Bottom, 1))
                     {
                         Print("Market Value {0} Crossed Below Bottom {1}", MarketSeries.Close.LastValue, bollingerBands.Bottom.LastValue);
-                        //ExecuteMarketOrder(TradeType.Buy, Symbol, volumeInUnits, label, StopLossInPips, TakeProfitInPips);
                         hasCrossedBelow = true;
                     }
                 }
@@ -203,34 +280,42 @@ namespace cAlgo
             }
         }
 
-        protected override void OnBar()
+        private bool DailyStopLossLimitNotReached()
         {
-            var top = bollingerBands.Top.Last(1);
-            var bottom = bollingerBands.Bottom.Last(1);
-            var volumeInUnits = Symbol.QuantityToVolumeInUnits(Quantity);
-
-            CheckTopAndBottom(top, bottom);
-
-            CheckAndExecute(volumeInUnits);
-
-            DelayTick();
-        }
-
-        protected override void OnTick()
-        {
-            if (AutocloseInversion)
+            if (DailyStopLossLimitEnabled)
             {
-                CheckOpenPositionsAndCloseInversions();
+                if (Server.Time.ToShortDateString().Equals(lastStopLoss.ToShortDateString()))
+                {
+                    if (qtdPositionLoss >= DailyStopLossLimit)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    qtdPositionLoss = 0;
+                    delayCounter = ExecutionDelay;
+                    limitReachedMsgSent = false;
+                }
             }
+            return true;
         }
 
         private void OnPositionClosed(PositionClosedEventArgs args)
         {
-            if (args.Reason == PositionCloseReason.StopLoss)
+            if (DailyStopLossLimitEnabled)
             {
-                qtdStopLoss++;
-                Print("StopLoss quantity {0}", qtdStopLoss);
+                if (args.Position.NetProfit < 0 && args.Reason == PositionCloseReason.StopLoss)
+                {
+                    qtdPositionLoss++;
+                    lastStopLoss = Server.Time;
+                }
+                else if (args.Position.NetProfit > 0)
+                {
+                    qtdPositionLoss = 0;
+                }
             }
         }
+
     }
 }
