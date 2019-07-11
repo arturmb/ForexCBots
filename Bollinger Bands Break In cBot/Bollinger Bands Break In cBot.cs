@@ -1,6 +1,6 @@
 ﻿// -------------------------------------------------------------------------------------------------
 //
-//    Author: Artur Martins Baarionuevo
+//    Author: Artur Martins Barrionuevo
 //    Version: 1.2
 //
 //    Project: Forex Robot specialized in the Bollinger Bands signals using parameters to reduce losses and to identify the "Breakins" in the borders.
@@ -11,6 +11,7 @@
 //    
 //
 //    TODO:
+//    * Parameter for disabling multiple open positions per currency pair
 //    * Manual Trailing Stop with Moving Take Profit
 //    * Give Option to use middle bolling Line (maybe in a new bot...)
 //
