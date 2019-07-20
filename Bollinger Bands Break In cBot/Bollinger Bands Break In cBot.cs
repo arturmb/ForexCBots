@@ -1,17 +1,17 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 //
 //    Author: Artur Martins Barrionuevo
-//    Version: 1.2
+//    Version: 1.3
 //
 //    Project: Forex Robot specialized in the Bollinger Bands signals using parameters to reduce losses and to identify the "Breakins" in the borders.
 //
 //    Versions:
 //    1.0 - Initial implementation with auto close in case of a "Break In inversion".
 //    1.2 - Implementation of two new Features: DayTradeOnly mode and DailyStopLossLimit (these two must be active together to be effective).
+//    1.3 - New Feature: "Single Position Only" parameter for opening only one Position per Symbol
 //    
 //
 //    TODO:
-//    * Parameter for disabling multiple open positions per currency pair
 //    * Manual Trailing Stop with Moving Take Profit
 //    * Give Option to use middle bolling Line (maybe in a new bot...)
 //
@@ -74,6 +74,9 @@ namespace cAlgo
         [Parameter("Crossing Signal Delay In Periods", DefaultValue = 0, MinValue = 0, MaxValue = 5, Step = 1)]
         public int ExecutionDelay { get; set; }
 
+        [Parameter("Single Position Only", DefaultValue = false)]
+        public bool SinglePositionOnly { get; set; }
+
 
         BollingerBands bollingerBands;
 
@@ -104,7 +107,7 @@ namespace cAlgo
 
             if (!DayTradeOnly || (DayTradeOnly && !sessionClosing))
             {
-                if (DailyStopLossLimitNotReached())
+                if (DailyStopLossLimitNotReached() && IsThePositionAuthorized())
                 {
                     CheckTopAndBottom(top, bottom);
 
@@ -114,7 +117,7 @@ namespace cAlgo
                 }
                 else
                 {
-                    if (!limitReachedMsgSent)
+                    if (!limitReachedMsgSent && qtdPositionLoss >= DailyStopLossLimit)
                     {
                         Print("Daily Stop Loss Limit reached! No new orders will be executed today! (Date: {0})", Server.Time.ToLongDateString());
                         limitReachedMsgSent = true;
@@ -315,6 +318,18 @@ namespace cAlgo
                 {
                     qtdPositionLoss = 0;
                 }
+            }
+        }
+
+        private bool IsThePositionAuthorized()
+        {
+            if (SinglePositionOnly)
+            {
+                return Positions.Count(x => x.SymbolCode == Symbol.Code) <= 0;
+            }
+            else
+            {
+                return true;
             }
         }
 
